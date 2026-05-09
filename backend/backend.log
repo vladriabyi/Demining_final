@@ -1,0 +1,16 @@
+INFO:     Started server process [283049]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58418 - "POST /api/auth/register HTTP/1.1" 201 Created
+INFO:     127.0.0.1:59496 - "POST /api/auth/register HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:59508 - "POST /api/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59516 - "GET /api/territories/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59512 - "GET /api/requests/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59532 - "GET /api/requests/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59560 - "GET /api/requests/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59548 - "GET /api/territories/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59572 - "GET /api/requests/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59580 - "GET /api/requests/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59588 - "GET /api/requests/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60048 - "POST /api/requests/ HTTP/1.1" 201 Created

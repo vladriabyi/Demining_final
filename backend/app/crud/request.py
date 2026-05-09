@@ -16,11 +16,30 @@ def _q():
     )
 
 
-async def get_all(db: AsyncSession, current_user: User) -> List[DeminingRequest]:
+async def get_all(
+    db: AsyncSession,
+    current_user: User,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    status: Optional[RequestStatus] = None,
+    priority: Optional[Priority] = None,
+) -> List[DeminingRequest]:
     q = _q()
     if current_user.role == UserRole.civilian:
         q = q.where(DeminingRequest.requester_id == current_user.id)
-    r = await db.execute(q.order_by(DeminingRequest.created_at.desc()))
+
+    if status:
+        q = q.where(DeminingRequest.status == status)
+    if priority:
+        q = q.where(DeminingRequest.priority == priority)
+
+    q = q.order_by(DeminingRequest.created_at.desc())
+
+    if limit is not None:
+        q = q.limit(limit)
+    q = q.offset(offset)
+
+    r = await db.execute(q)
     return list(r.scalars().all())
 
 

@@ -2,6 +2,7 @@ import { memo } from "react"
 import { MapContainer, TileLayer, CircleMarker, Marker, Popup, useMapEvents } from "react-leaflet"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
+import MarkerClusterGroup from "react-leaflet-cluster"
 import type { DeminingRequest, Territory } from "../types"
 import { REQUEST_STATUS, TERRITORY_STATUS, PRIORITY_LABEL } from "./constants"
 
@@ -63,38 +64,40 @@ export default memo(function MapView({
         )
       })}
 
-      {requests.map(r => {
-        const cfg   = REQUEST_STATUS[r.status] ?? { color: "#94a3b8", label: r.status }
-        const icon  = L.divIcon({
-          className: "",
-          html: `<div style="width:13px;height:13px;background:${cfg.color};border:2px solid rgba(255,255,255,.45);transform:rotate(45deg);cursor:pointer;border-radius:2px;box-shadow:0 2px 8px rgba(0,0,0,.6)"></div>`,
-          iconSize: [13, 13],
-          iconAnchor: [7, 7],
-        })
-        return (
-          <Marker
-            key={`r-${r.id}`}
-            position={[r.latitude, r.longitude]}
-            icon={icon}
-            eventHandlers={{ click: () => onRequestClick?.(r) }}
-          >
-            <Popup>
-              <p style={{ fontWeight: 700, marginBottom: 4, color: "#f1f5f9" }}>{r.title}</p>
-              <p style={{ fontSize: 11, color: cfg.color, marginBottom: 2 }}>{cfg.label}</p>
-              <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>{r.location_name}</p>
-              <p style={{ fontSize: 11, color: "#64748b" }}>Пріоритет: {PRIORITY_LABEL[r.priority]}</p>
-              {onRequestClick && (
-                <button
-                  onClick={() => onRequestClick(r)}
-                  style={{ marginTop: 8, fontSize: 11, color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 6, padding: "3px 10px", cursor: "pointer", width: "100%" }}
-                >
-                  Переглянути →
-                </button>
-              )}
-            </Popup>
-          </Marker>
-        )
-      })}
+      <MarkerClusterGroup chunkedLoading maxClusterRadius={50}>
+        {requests.map(r => {
+          const cfg   = REQUEST_STATUS[r.status] ?? { color: "#94a3b8", label: r.status }
+          const icon  = L.divIcon({
+            className: "",
+            html: `<div style="width:13px;height:13px;background:${cfg.color};border:2px solid rgba(255,255,255,.45);transform:rotate(45deg);cursor:pointer;border-radius:2px;box-shadow:0 2px 8px rgba(0,0,0,.6)"></div>`,
+            iconSize: [13, 13],
+            iconAnchor: [7, 7],
+          })
+          return (
+            <Marker
+              key={`r-${r.id}`}
+              position={[r.latitude, r.longitude]}
+              icon={icon}
+              eventHandlers={{ click: () => onRequestClick?.(r) }}
+            >
+              <Popup>
+                <p style={{ fontWeight: 700, marginBottom: 4, color: "#f1f5f9" }}>{r.title}</p>
+                <p style={{ fontSize: 11, color: cfg.color, marginBottom: 2 }}>{cfg.label}</p>
+                <p style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>{r.location_name}</p>
+                <p style={{ fontSize: 11, color: "#64748b" }}>Пріоритет: {PRIORITY_LABEL[r.priority]}</p>
+                {onRequestClick && (
+                  <button
+                    onClick={() => onRequestClick(r)}
+                    style={{ marginTop: 8, fontSize: 11, color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 6, padding: "3px 10px", cursor: "pointer", width: "100%" }}
+                  >
+                    Переглянути →
+                  </button>
+                )}
+              </Popup>
+            </Marker>
+          )
+        })}
+      </MarkerClusterGroup>
 
       {selectedCoords && (
         <CircleMarker

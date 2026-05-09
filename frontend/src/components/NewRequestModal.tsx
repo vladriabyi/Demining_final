@@ -1,4 +1,7 @@
-import { memo, useRef, useState } from "react"
+import { memo, useRef, useState, useEffect } from "react"
+import { useForm } from "react-hook-form"
+import { zodResolver } from "@hookform/resolvers/zod"
+import { z } from "zod"
 import { createRequest, uploadPhoto } from "../api/requests"
 import { useToast } from "../context/ToastContext"
 import type { DeminingRequest, Priority } from "../types"
@@ -9,16 +12,31 @@ interface Props { onClose: () => void; onCreated: (r: DeminingRequest) => void }
 const PRIORITIES: Priority[] = ["low", "medium", "high", "critical"]
 const PRIORITY_LABELS = { low: "🟢 Низький", medium: "🟡 Середній", high: "🟠 Високий", critical: "🔴 Критичний" }
 
-const INIT = { title: "", description: "", priority: "medium" as Priority, location_name: "", latitude: "", longitude: "" }
 const ALLOWED = ["image/jpeg", "image/png"]
 const MAX_BYTES = 5 * 1024 * 1024
+
+const requestSchema = z.object({
+  title: z.string().min(3, "Назва повинна містити щонайменше 3 символи").max(100, "Назва занадто довга"),
+  description: z.string().optional(),
+  priority: z.enum(["low", "medium", "high", "critical"]),
+  location_name: z.string().min(3, "Локація повинна містити щонайменше 3 символи"),
+  latitude: z.union([z.string(), z.number()]).transform(v => Number(v)).pipe(z.number().min(-90, "Невалідна широта").max(90, "Невалідна широта")),
+  longitude: z.union([z.string(), z.number()]).transform(v => Number(v)).pipe(z.number().min(-180, "Невалідна довгота").max(180, "Невалідна довгота")),
+})
+
+type RequestFormData = z.infer<typeof requestSchema>
 
 const inp = "w-full rounded-xl border border-white/8 px-3 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-amber-500/50 transition"
 const bg  = { background: "rgba(255,255,255,0.04)" }
 
 export default memo(function NewRequestModal({ onClose, onCreated }: Props) {
   const toast = useToast()
-  const [form, setForm]           = useState(INIT)
+
+  const { register, handleSubmit, setValue, formState: { errors } } = useForm<RequestFormData>({
+    resolver: zodResolver(requestSchema),
+    defaultValues: { priority: "medium", latitude: 0, longitude: 0 }
+  })
+
   const [photo, setPhoto]         = useState<File | null>(null)
   const [preview, setPreview]     = useState<string | null>(null)
   const [loading, setLoading]     = useState(false)
@@ -26,12 +44,15 @@ export default memo(function NewRequestModal({ onClose, onCreated }: Props) {
   const [coords, setCoords]       = useState<{ lat: number; lng: number } | null>(null)
   const fileRef                   = useRef<HTMLInputElement>(null)
 
-  const set = (f: keyof typeof INIT) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
-    setForm(p => ({ ...p, [f]: e.target.value }))
+  useEffect(() => {
+    setValue("latitude", "")
+    setValue("longitude", "")
+  }, [setValue])
 
   const handleMapClick = (lat: number, lng: number) => {
     setCoords({ lat, lng })
-    setForm(p => ({ ...p, latitude: lat.toFixed(6), longitude: lng.toFixed(6) }))
+    setValue("latitude", parseFloat(lat.toFixed(6)), { shouldValidate: true })
+    setValue("longitude", parseFloat(lng.toFixed(6)), { shouldValidate: true })
     setShowMap(false)
   }
 
@@ -44,14 +65,11 @@ export default memo(function NewRequestModal({ onClose, onCreated }: Props) {
     setPreview(URL.createObjectURL(file))
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const onSubmit = async (data: RequestFormData) => {
     setLoading(true)
     try {
       let created = await createRequest({
-        ...form,
-        latitude:  Number(form.latitude),
-        longitude: Number(form.longitude),
+        ...data,
       })
       if (photo) {
         try { created = await uploadPhoto(created.id, photo) }
@@ -77,17 +95,35 @@ export default memo(function NewRequestModal({ onClose, onCreated }: Props) {
           <button onClick={onClose} className="text-slate-500 hover:text-white transition text-xl">×</button>
         </div>
 
-        <form onSubmit={handleSubmit} className="overflow-y-auto p-6 flex flex-col gap-3">
-          <input className={inp} style={bg} placeholder="Назва*" value={form.title} onChange={set("title")} required />
-          <textarea className={`${inp} resize-none`} style={bg} placeholder="Опис ситуації" rows={2} value={form.description} onChange={set("description")} />
-          <select className={inp} style={bg} value={form.priority} onChange={set("priority")}>
-            {PRIORITIES.map(p => <option key={p} value={p}>{PRIORITY_LABELS[p]}</option>)}
-          </select>
-          <input className={inp} style={bg} placeholder="Назва локації*" value={form.location_name} onChange={set("location_name")} required />
+        <form onSubmit={handleSubmit(onSubmit)} className="overflow-y-auto p-6 flex flex-col gap-3">
+          <div>
+            <input className={inp} style={bg} placeholder="Назва*" {...register("title")} />
+            {errors.title && <p className="text-red-500 text-xs mt-1">{errors.title.message}</p>}
+          </div>
+          <div>
+            <textarea className={`${inp} resize-none`} style={bg} placeholder="Опис ситуації" rows={2} {...register("description")} />
+            {errors.description && <p className="text-red-500 text-xs mt-1">{errors.description.message}</p>}
+          </div>
+          <div>
+            <select className={inp} style={bg} {...register("priority")}>
+              {PRIORITIES.map(p => <option key={p} value={p}>{PRIORITY_LABELS[p]}</option>)}
+            </select>
+            {errors.priority && <p className="text-red-500 text-xs mt-1">{errors.priority.message}</p>}
+          </div>
+          <div>
+            <input className={inp} style={bg} placeholder="Назва локації*" {...register("location_name")} />
+            {errors.location_name && <p className="text-red-500 text-xs mt-1">{errors.location_name.message}</p>}
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <input className={inp} style={bg} type="number" step="any" placeholder="Широта" value={form.latitude} onChange={set("latitude")} required />
-            <input className={inp} style={bg} type="number" step="any" placeholder="Довгота" value={form.longitude} onChange={set("longitude")} required />
+            <div>
+              <input className={inp} style={bg} type="number" step="any" placeholder="Широта" {...register("latitude")} />
+              {errors.latitude && <p className="text-red-500 text-xs mt-1">{errors.latitude.message}</p>}
+            </div>
+            <div>
+              <input className={inp} style={bg} type="number" step="any" placeholder="Довгота" {...register("longitude")} />
+              {errors.longitude && <p className="text-red-500 text-xs mt-1">{errors.longitude.message}</p>}
+            </div>
           </div>
 
           <button type="button" onClick={() => setShowMap(true)}

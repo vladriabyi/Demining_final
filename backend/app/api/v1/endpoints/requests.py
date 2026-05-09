@@ -3,6 +3,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
+from aiocache import cached
+
+from typing import Optional
 
 from app.db.database import get_db
 from app.schemas.request import (
@@ -14,6 +17,7 @@ from app.schemas.request import (
 from app.crud import request as crud
 from app.api.v1.dependencies import get_current_user
 from app.models.user import User, UserRole
+from app.models.request import RequestStatus, Priority
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -28,13 +32,20 @@ def _is_staff(user: User) -> bool:
 
 @router.get("/", response_model=List[RequestOut])
 async def list_requests(
+    limit: Optional[int] = None,
+    offset: int = 0,
+    status: Optional[RequestStatus] = None,
+    priority: Optional[Priority] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await crud.get_all(db, current_user)
+    return await crud.get_all(
+        db, current_user, limit=limit, offset=offset, status=status, priority=priority
+    )
 
 
 @router.get("/stats", response_model=DashboardStatsOut)
+@cached(ttl=60)
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
