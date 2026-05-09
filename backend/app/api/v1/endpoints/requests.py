@@ -1,11 +1,8 @@
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
-from aiocache import cached
-
-from typing import Optional
+from typing import List, Optional
 
 from app.db.database import get_db
 from app.schemas.request import (
@@ -13,112 +10,129 @@ from app.schemas.request import (
     RequestUpdate,
     RequestOut,
     DashboardStatsOut,
+    NearbyRequestOut,
 )
 from app.crud import request as crud
 from app.api.v1.dependencies import get_current_user
 from app.models.user import User, UserRole
-from app.models.request import RequestStatus, Priority
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
-UPLOAD_DIR = "/app/uploads"
-ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+UPLOAD_DIR       = "/app/uploads"
+ALLOWED_TYPES    = {"image/jpeg", "image/png"}
+MAX_FILE_SIZE    = 5 * 1024 * 1024   # 5 MB
+DUPLICATE_RADIUS = 200               # метрів — поріг виявлення дублікатів
 
 
 def _is_staff(user: User) -> bool:
     return user.role in (UserRole.coordinator, UserRole.admin, UserRole.operator)
 
 
+# ─── List & stats ─────────────────────────────────────────────────────────────
+
 @router.get("/", response_model=List[RequestOut])
 async def list_requests(
-    limit: Optional[int] = None,
-    offset: int = 0,
-    status: Optional[RequestStatus] = None,
-    priority: Optional[Priority] = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
-    return await crud.get_all(
-        db, current_user, limit=limit, offset=offset, status=status, priority=priority
-    )
+    return await crud.get_all(db, current_user)
 
 
 @router.get("/stats", response_model=DashboardStatsOut)
-@cached(ttl=60)
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _:  User         = Depends(get_current_user),
 ):
     return await crud.get_dashboard_stats(db)
 
 
+# ─── PostGIS: пошук заявок поблизу (виявлення дублікатів) ───────────────────
+
+@router.get("/nearby", response_model=List[NearbyRequestOut])
+async def get_nearby_requests(
+    lat:        float = Query(..., description="Широта точки пошуку"),
+    lon:        float = Query(..., description="Довгота точки пошуку"),
+    radius_m:   float = Query(DUPLICATE_RADIUS, description="Радіус пошуку в метрах"),
+    exclude_id: Optional[int] = Query(None, description="ID заявки для виключення з результатів"),
+    db:         AsyncSession = Depends(get_db),
+    _:          User         = Depends(get_current_user),
+):
+    """
+    Повертає заявки у заданому радіусі від точки.
+    Використовується для:
+      - виявлення потенційних дублікатів перед поданням нової заявки
+      - кластеризації МНЗ на картографічній підоснові
+    Реалізовано через PostGIS ST_DWithin з типом geography (метри).
+    """
+    rows = await crud.find_nearby(db, lat, lon, radius_m, exclude_id)
+    return rows
+
+
+# ─── Single request CRUD ──────────────────────────────────────────────────────
+
 @router.get("/{rid}", response_model=RequestOut)
 async def get_request(
-    rid: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    rid:          int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
     req = await crud.get_by_id(db, rid)
     if not req:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Заявку не знайдено")
     if not _is_staff(current_user) and req.requester_id != current_user.id:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(403, "Доступ заборонено")
     return req
 
 
 @router.post("/", response_model=RequestOut, status_code=201)
 async def create_request(
-    data: RequestCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    data:         RequestCreate,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
     return await crud.create(db, data, current_user.id)
 
 
 @router.patch("/{rid}", response_model=RequestOut)
 async def update_request(
-    rid: int,
-    data: RequestUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    rid:          int,
+    data:         RequestUpdate,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
     req = await crud.get_by_id(db, rid)
     if not req:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Заявку не знайдено")
     if not _is_staff(current_user) and req.requester_id != current_user.id:
-        raise HTTPException(403, "Forbidden")
-    if not _is_staff(current_user) and req.status.value != "pending":
-        raise HTTPException(403, "Cannot edit non-pending request")
-    return await crud.update(db, req, data)
+        raise HTTPException(403, "Доступ заборонено")
+    if not _is_staff(current_user) and req.status != "pending":
+        raise HTTPException(403, "Редагування можливе лише у статусі «pending»")
+    return await crud.update(db, req, data, current_user.id)
 
 
 @router.post("/{rid}/photo", response_model=RequestOut)
 async def upload_photo(
-    rid: int,
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    rid:          int,
+    file:         UploadFile   = File(...),
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
     req = await crud.get_by_id(db, rid)
     if not req:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Заявку не знайдено")
     if not _is_staff(current_user) and req.requester_id != current_user.id:
-        raise HTTPException(403, "Forbidden")
-
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(400, "Only JPEG and PNG images are allowed")
+        raise HTTPException(403, "Доступ заборонено")
+    if file.content_type not in ALLOWED_TYPES:
+        raise HTTPException(400, "Дозволено лише JPEG та PNG")
 
     contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(400, "File too large. Maximum size is 5 MB")
+        raise HTTPException(400, "Файл завеликий. Максимум 5 МБ")
 
-    ext = "jpg" if file.content_type == "image/jpeg" else "png"
+    ext      = "jpg" if file.content_type == "image/jpeg" else "png"
     filename = f"{uuid.uuid4().hex}.{ext}"
-
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    with open(file_path, "wb") as f:
+    with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
         f.write(contents)
 
     return await crud.set_photo(db, req, filename)
@@ -126,13 +140,13 @@ async def upload_photo(
 
 @router.delete("/{rid}", status_code=204)
 async def delete_request(
-    rid: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    rid:          int,
+    db:           AsyncSession = Depends(get_db),
+    current_user: User         = Depends(get_current_user),
 ):
     req = await crud.get_by_id(db, rid)
     if not req:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Заявку не знайдено")
     if not _is_staff(current_user) and req.requester_id != current_user.id:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(403, "Доступ заборонено")
     await crud.delete(db, req)

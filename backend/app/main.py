@@ -3,15 +3,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
-from sqlalchemy.exc import SQLAlchemyError
-import logging
-
 from app.api.v1.endpoints import auth, users, territories, requests
 from app.db.database import engine, Base
 from app.models import user, territory, request  # noqa: F401
-
-logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "/app/uploads"
 
@@ -47,24 +41,6 @@ app.include_router(territories.router, prefix="/api")
 app.include_router(requests.router,    prefix="/api")
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-
-@app.exception_handler(SQLAlchemyError)
-async def sqlalchemy_exception_handler(request, exc: SQLAlchemyError):
-    logger.error(f"Database error: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error. Database operation failed."},
-    )
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error."},
-    )
 
 
 @app.get("/")
