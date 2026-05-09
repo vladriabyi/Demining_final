@@ -5,9 +5,12 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    host: "0.0.0.0",   // потрібно для Docker
     proxy: {
-      "/api":     { target: "http://localhost:8000", changeOrigin: true },
-      "/uploads": { target: "http://localhost:8000", changeOrigin: true },
+      // У Docker-мережі бекенд доступний за іменем сервісу "backend",
+      // а не "localhost". Vite проксіює /api та /uploads до бекенду.
+      "/api":     { target: "http://backend:8000", changeOrigin: true },
+      "/uploads": { target: "http://backend:8000", changeOrigin: true },
     },
   },
 })

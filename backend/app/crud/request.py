@@ -1,20 +1,86 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.orm import selectinload
 from typing import Optional, List
+from fastapi import HTTPException
 
-from app.models.request import DeminingRequest, RequestStatus, Priority
+from app.models.request import (
+    DeminingRequest, RequestStatus, Priority,
+    RequestStatusHistory, VALID_TRANSITIONS
+)
 from app.models.user import User, UserRole
 from app.models.territory import Territory
 from app.schemas.request import RequestCreate, RequestUpdate
 
 
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
 def _q():
+    """Базовий запит із завантаженням пов'язаних об'єктів."""
     return select(DeminingRequest).options(
         selectinload(DeminingRequest.requester),
         selectinload(DeminingRequest.assignee),
+        selectinload(DeminingRequest.status_history),
     )
 
+
+def _make_point_wkt(longitude: float, latitude: float) -> str:
+    """Формує WKT-рядок для PostGIS POINT у форматі EWKT (включає SRID 4326)."""
+    return f"SRID=4326;POINT({longitude} {latitude})"
+
+
+def _validate_status_transition(current: RequestStatus, new: RequestStatus) -> None:
+    """
+    Перевіряє допустимість переходу між статусами.
+    Реалізує 6-етапний життєвий цикл заявки (підрозділ 1.1.2).
+    """
+    allowed = VALID_TRANSITIONS.get(current, set())
+    if new not in allowed:
+        allowed_names = ", ".join(s.value for s in allowed) or "жодного"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Неприпустимий перехід статусу: «{current.value}» → «{new.value}». "
+                f"Допустимі переходи з «{current.value}»: {allowed_names}."
+            ),
+        )
+
+
+async def _validate_assignee(db: AsyncSession, assignee_id: int) -> None:
+    """
+    Перевіряє що виконавець є staff-користувачем (оператор/координатор/адмін).
+    Цивільний не може бути призначений виконавцем заявки.
+    """
+    assignee = await db.get(User, assignee_id)
+    if not assignee:
+        raise HTTPException(status_code=404, detail="Виконавця не знайдено.")
+    if assignee.role == UserRole.civilian:
+        raise HTTPException(
+            status_code=400,
+            detail="Виконавцем може бути лише оператор, координатор або адміністратор."
+        )
+
+
+async def _log_status_change(
+    db: AsyncSession,
+    request_id: int,
+    old_status: RequestStatus,
+    new_status: RequestStatus,
+    changed_by_id: int,
+    comment: Optional[str] = None,
+) -> None:
+    """Записує зміну статусу до журналу змін (audit log)."""
+    entry = RequestStatusHistory(
+        request_id=request_id,
+        old_status=old_status.value,
+        new_status=new_status.value,
+        changed_by=changed_by_id,
+        comment=comment,
+    )
+    db.add(entry)
+
+
+# ─── CRUD operations ──────────────────────────────────────────────────────────
 
 async def get_all(db: AsyncSession, current_user: User) -> List[DeminingRequest]:
     q = _q()
@@ -29,11 +95,31 @@ async def get_by_id(db: AsyncSession, rid: int) -> Optional[DeminingRequest]:
     return r.scalar_one_or_none()
 
 
-async def create(db: AsyncSession, data: RequestCreate, requester_id: int) -> DeminingRequest:
-    req = DeminingRequest(**data.model_dump(), requester_id=requester_id)
+async def create(
+    db: AsyncSession,
+    data: RequestCreate,
+    requester_id: int,
+) -> DeminingRequest:
+    req = DeminingRequest(
+        **data.model_dump(),
+        requester_id=requester_id,
+        priority=Priority.medium,           # пріоритет завжди medium при створенні
+        location=_make_point_wkt(data.longitude, data.latitude),
+    )
     db.add(req)
     await db.commit()
     await db.refresh(req)
+
+    # Записуємо початковий статус до журналу
+    await _log_status_change(
+        db, req.id,
+        old_status=RequestStatus.pending,
+        new_status=RequestStatus.pending,
+        changed_by_id=requester_id,
+        comment="Заявку створено",
+    )
+    await db.commit()
+
     return await get_by_id(db, req.id)
 
 
@@ -41,8 +127,27 @@ async def update(
     db: AsyncSession,
     req: DeminingRequest,
     data: RequestUpdate,
+    current_user_id: int,
 ) -> DeminingRequest:
     changes = data.model_dump(exclude_unset=True)
+    comment = changes.pop("comment", None)
+
+    # Валідація переходу статусу
+    if "status" in changes:
+        new_status = changes["status"]
+        _validate_status_transition(req.status, new_status)
+        await _log_status_change(
+            db, req.id,
+            old_status=req.status,
+            new_status=new_status,
+            changed_by_id=current_user_id,
+            comment=comment,
+        )
+
+    # Валідація виконавця
+    if "assigned_to_id" in changes and changes["assigned_to_id"] is not None:
+        await _validate_assignee(db, changes["assigned_to_id"])
+
     should_notify = "assigned_to_id" in changes or "status" in changes
 
     for k, v in changes.items():
@@ -66,7 +171,11 @@ async def update(
     return refreshed
 
 
-async def set_photo(db: AsyncSession, req: DeminingRequest, photo_path: str) -> DeminingRequest:
+async def set_photo(
+    db: AsyncSession,
+    req: DeminingRequest,
+    photo_path: str,
+) -> DeminingRequest:
     req.photo_path = photo_path
     await db.commit()
     await db.refresh(req)
@@ -78,27 +187,87 @@ async def delete(db: AsyncSession, req: DeminingRequest) -> None:
     await db.commit()
 
 
+# ─── PostGIS spatial queries ──────────────────────────────────────────────────
+
+async def find_nearby(
+    db: AsyncSession,
+    latitude: float,
+    longitude: float,
+    radius_m: float = 200,
+    exclude_id: Optional[int] = None,
+) -> list[dict]:
+    """
+    Пошук заявок у радіусі radius_m метрів від вказаної точки.
+    Використовує PostGIS ST_DWithin з типом geography (точна відстань у метрах).
+    Застосовується для виявлення потенційних дублікатів (підрозділ 1.1.2).
+
+    Geography vs Geometry:
+      - Geometry: плоска геометрія, одиниці — градуси (неточно для відстаней)
+      - Geography: сферична геометрія, одиниці — метри (точно)
+    """
+    point_wkt = f"POINT({longitude} {latitude})"
+
+    sql = text("""
+        SELECT
+            id,
+            title,
+            status,
+            latitude,
+            longitude,
+            location_name,
+            ST_Distance(
+                location::geography,
+                ST_GeographyFromText(:point_wkt)
+            ) AS distance_m
+        FROM demining_requests
+        WHERE
+            location IS NOT NULL
+            AND ST_DWithin(
+                location::geography,
+                ST_GeographyFromText(:point_wkt),
+                :radius_m
+            )
+            AND (:exclude_id IS NULL OR id != :exclude_id)
+        ORDER BY distance_m ASC
+        LIMIT 10
+    """)
+
+    result = await db.execute(
+        sql,
+        {"point_wkt": point_wkt, "radius_m": radius_m, "exclude_id": exclude_id}
+    )
+    rows = result.mappings().all()
+    return [dict(row) for row in rows]
+
+
+# ─── Dashboard stats (один запит замість шести) ───────────────────────────────
+
 async def get_dashboard_stats(db: AsyncSession) -> dict:
-    total_requests = await db.scalar(select(func.count(DeminingRequest.id))) or 0
-    pending_requests = await db.scalar(
-        select(func.count(DeminingRequest.id)).where(DeminingRequest.status == RequestStatus.pending)
+    """
+    Оптимізована версія: один SQL-запит з умовною агрегацією
+    замість шести окремих SELECT COUNT(*).
+    """
+    stats_sql = text("""
+        SELECT
+            COUNT(*)                                                          AS total_requests,
+            COUNT(*) FILTER (WHERE status = 'pending')                        AS pending_requests,
+            COUNT(*) FILTER (WHERE status = 'in_progress')                    AS in_progress_requests,
+            COUNT(*) FILTER (WHERE status = 'completed')                      AS completed_requests,
+            COUNT(*) FILTER (WHERE priority = 'critical')                     AS critical_requests
+        FROM demining_requests
+    """)
+
+    row = (await db.execute(stats_sql)).mappings().one()
+
+    total_territories = await db.scalar(
+        select(func.count(Territory.id))
     ) or 0
-    in_progress_requests = await db.scalar(
-        select(func.count(DeminingRequest.id)).where(DeminingRequest.status == RequestStatus.in_progress)
-    ) or 0
-    completed_requests = await db.scalar(
-        select(func.count(DeminingRequest.id)).where(DeminingRequest.status == RequestStatus.completed)
-    ) or 0
-    critical_requests = await db.scalar(
-        select(func.count(DeminingRequest.id)).where(DeminingRequest.priority == Priority.critical)
-    ) or 0
-    total_territories = await db.scalar(select(func.count(Territory.id))) or 0
 
     return {
-        "total_requests": total_requests,
-        "pending_requests": pending_requests,
-        "in_progress_requests": in_progress_requests,
-        "completed_requests": completed_requests,
-        "critical_requests": critical_requests,
-        "total_territories": total_territories,
+        "total_requests":       int(row["total_requests"]),
+        "pending_requests":     int(row["pending_requests"]),
+        "in_progress_requests": int(row["in_progress_requests"]),
+        "completed_requests":   int(row["completed_requests"]),
+        "critical_requests":    int(row["critical_requests"]),
+        "total_territories":    total_territories,
     }
