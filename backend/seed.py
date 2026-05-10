@@ -32,14 +32,16 @@ def generate_ukraine_coords():
     return lat, lon
 
 async def clear_database(db: AsyncSession):
-    """Drops all tables and recreates them to ensure a clean slate."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+    """Truncates all tables to ensure a clean slate without breaking Alembic."""
+    from sqlalchemy import text
+
+    # We must TRUNCATE CASCADE all application tables, but explicitly EXCLUDE alembic_version
+    await db.execute(text("TRUNCATE TABLE request_status_history, demining_requests, territories, users CASCADE;"))
+    await db.commit()
 
 async def seed_data():
     async with SessionLocal() as db:
-        print("Clearing and recreating database schema...")
+        print("Clearing database records...")
         await clear_database(db)
 
         print("Seeding Users...")
@@ -153,6 +155,19 @@ async def seed_data():
                 assigned_to_id=assignee.id if assignee else None
             )
             db.add(req)
+
+            # Flush to get the request ID so we can insert history
+            await db.flush()
+
+            # Create a history entry to simulate proper audit logs
+            history = RequestStatusHistory(
+                request_id=req.id,
+                old_status="pending",
+                new_status=status.value,
+                changed_by=requester.id,
+                comment="Автоматично створено системою (симуляція)"
+            )
+            db.add(history)
 
         await db.commit()
         print("Database seeding completed successfully!")

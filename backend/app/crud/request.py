@@ -135,14 +135,15 @@ async def update(
     # Валідація переходу статусу
     if "status" in changes:
         new_status = changes["status"]
-        _validate_status_transition(req.status, new_status)
-        await _log_status_change(
-            db, req.id,
-            old_status=req.status,
-            new_status=new_status,
-            changed_by_id=current_user_id,
-            comment=comment,
-        )
+        if req.status != new_status:
+            _validate_status_transition(req.status, new_status)
+            await _log_status_change(
+                db, req.id,
+                old_status=req.status,
+                new_status=new_status,
+                changed_by_id=current_user_id,
+                comment=comment,
+            )
 
     # Валідація виконавця
     if "assigned_to_id" in changes and changes["assigned_to_id"] is not None:
